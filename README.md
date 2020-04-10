@@ -28,3 +28,7 @@ For example, the following container would be available via DNS as `myname`, `my
 If you need more features like **systemd interation** and **dns forwarding** please check [resolvable](https://hub.docker.com/r/mgood/resolvable/)
 
 Any contribution is, of course, welcome. :)
+
+## Swarm task support added
+The names of tasks belong to the following stack will be automatically added to /etc/hosts.
+   docker stack deploy --compose-file docker-compose.yaml STACKNAME

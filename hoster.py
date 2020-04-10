@@ -35,25 +35,88 @@ def main():
         container = get_container_data(dockerClient, container_id)
         hosts[container_id] = container
 
+    # existing tasks
+    for t in dockerClient.tasks():
+        handle_task(dockerClient, t)
+
     update_hosts_file()
+
+    handlers = { 'container': handle_container
+               , 'node': handle_node }
 
     #listen for events to keep the hosts file updated
     for e in events:
-        if e["Type"]!="container": 
-            continue
-        
-        status = e["status"]
-        if status =="start":
-            container_id = e["id"]
-            container = get_container_data(dockerClient, container_id)
-            hosts[container_id] = container
+        handlers.get(e['Type'], handle_nop)(dockerClient, e)
+
+def handle_nop(client, e):
+    pass
+
+def handle_container(dockerClient, e):
+    status = e["status"]
+    if status =="start":
+        container_id = e["id"]
+        container = get_container_data(dockerClient, container_id)
+        hosts[container_id] = container
+        update_hosts_file()
+
+    if status in ("stop", "die", "destroy"):
+        container_id = e["id"]
+        if container_id in hosts:
+            hosts.pop(container_id)
             update_hosts_file()
 
-        if status=="stop" or status=="die" or status=="destroy":
-            container_id = e["id"]
-            if container_id in hosts:
-                hosts.pop(container_id)
-                update_hosts_file()
+def handle_node(client, e):
+    if e['Action'] != 'update':
+        return
+    s = e['Actor']['Attributes'].get('state.new')
+    if s and s != 'down':
+        return
+    if not e['Actor']['Attributes']['name']:
+        return
+
+    dirty = False
+    node_id = e['Actor']['ID']
+    for t in client.tasks(filters={'node': node_id}):
+        dirty = handle_task(client, t) or dirty
+
+    if dirty:
+        update_hosts_file()
+    
+
+def handle_task(client, t):
+    task_id = t['ID']
+
+    if t['DesiredState'] == 'running':
+        hosts[task_id] = get_task_data(t)
+        return True
+    elif t['DesiredState'] == 'shutdown':
+        if task_id in hosts:
+            hosts.pop(task_id)
+            return True
+    return False
+
+
+def get_task_data(task):
+    namespace = task['Spec']['ContainerSpec']['Labels']['com.docker.stack.namespace']
+
+    rv = []
+
+    for n in task['Spec']['Networks']:
+        if not n['Aliases']:
+            continue
+        # overlay network can not be accessed directly
+        # we only depend on master port fowarding
+        #for na in t['NetworksAttachments']:
+        #    if na['Network']['ID'] == n['Aliases']['Target']:
+        #        ip_addrs = map(lambda a: a.split('/')[0] ,na['Addresses'])
+        #        break
+        #for ip in ip_addrs:
+        #    rv.append({ 'ip': ip
+        #              , 'domains': set(n['Aliases']+[f'{namespace}_{a}' for a in n['Aliases']])}
+        rv.append({ 'ip': '127.0.0.1' 
+                  , 'domains': set(n['Aliases']+[f'{namespace}_{a}' for a in n['Aliases']])})
+
+    return rv
 
 
 def get_container_data(dockerClient, container_id):
@@ -83,6 +146,15 @@ def get_container_data(dockerClient, container_id):
 
     return result
 
+def test_update_hosts_file():
+    if not len(hosts):
+        print('Nothing to update')
+        return
+
+    print('UPDATE:')
+    for id, addresses in hosts.items():
+        for addr in addresses:
+            print("%s    %s\n"%(addr["ip"],"   ".join(addr["domains"])))
 
 def update_hosts_file():
     if len(hosts)==0:
@@ -106,7 +178,7 @@ def update_hosts_file():
             break;
 
     #remove all the trailing newlines on the line list
-    while lines[-1].strip()=="": lines.pop()
+    while lines and lines[-1].strip()=="": lines.pop()
 
     #append all the domain lines
     if len(hosts)>0:
